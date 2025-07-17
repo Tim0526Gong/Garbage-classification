@@ -3,6 +3,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import cv2
 import serial
+import serial.tools.list_ports
 import numpy as np
 from ultralytics import YOLO
 from tkinter import *
@@ -12,20 +13,34 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 import time
 
-# === 模型與硬體初始化 ===
-model = YOLO(r"C:\Users\user\Documents\pico-robotic-arm-main (2)\pico-robotic-arm-main\best.pt")
+# === 模型初始化 ===
+model = YOLO("best.pt")  # 請換成你的模型路徑
 
+# === 自動搜尋可用串口（for macOS） ===
+def find_serial_port():
+    ports = list(serial.tools.list_ports.comports())
+    for p in ports:
+        if 'usb' in p.device.lower():
+            return p.device
+    return None
+
+port_name = find_serial_port()
 try:
-    ser = serial.Serial('COM5', 9600, timeout=1)
+    ser = serial.Serial(port_name, 9600, timeout=1) if port_name else None
+    if ser:
+        print(f"✅ 連接到序列埠: {port_name}")
+    else:
+        print("⚠️ 找不到序列埠，請確認裝置連接")
 except serial.SerialException:
-    print("⚠️ 無法連接到序列埠 COM1，請確認裝置或埠號")
+    print(f"⚠️ 無法連接到序列埠: {port_name}")
     ser = None
 
+# === 相機初始化 ===
 cap = cv2.VideoCapture(0)
 
-# === 資料儲存設定 ===
-save_folder = r"C:\Users\user\Documents\pwm\pwm\pwm_sg90_uart\photo\detect_snapshots"
-misclassified_folder = r"C:\Users\user\Documents\pwm\pwm\pwm_sg90_uart\photo\misclassified"
+# === 儲存資料夾設定 ===
+save_folder = "photo/detect_snapshots"
+misclassified_folder =  "photo/misclassified"
 os.makedirs(save_folder, exist_ok=True)
 os.makedirs(misclassified_folder, exist_ok=True)
 
@@ -42,27 +57,26 @@ total_counts = defaultdict(int)
 latest_snapshot = None
 latest_label = ""
 latest_conf = 0
-latest_results = None  # 拍照時的辨識結果
-
-# FPS 計算
+latest_results = None
 prev_frame_time = 0
 new_frame_time = 0
 
-# === Tkinter 主視窗設定 ===
+# === 建立主視窗 ===
 window = Tk()
 window.title("智慧垃圾分類系統")
-window.geometry("1500x750")
+window.geometry("1500x800")
 window.configure(bg="#e0e0e0")
 
-main_frame = Frame(window, bg="#e0e0e0")
-main_frame.pack(fill=BOTH, expand=True)
+# 使用 PanedWindow 拖曳左右區塊
+main_pane = PanedWindow(window, orient=HORIZONTAL, sashrelief=SUNKEN, sashwidth=8, bg="#e0e0e0")
+main_pane.pack(fill=BOTH, expand=True)
 
-# === 左邊即時畫面區塊 ===
-video_frame = Frame(main_frame, bg="#2c3e50", relief=RAISED, borderwidth=3)
-video_frame.pack(side=LEFT, padx=20, pady=20)
+# === 左側即時畫面區 ===
+video_frame = Frame(main_pane, bg="#2c3e50", relief=RAISED, borderwidth=3)
+main_pane.add(video_frame, minsize=400)
 
-video_label = Label(video_frame)
-video_label.pack()
+video_label = Label(video_frame, bg="#2c3e50")
+video_label.pack(fill=BOTH, expand=True, padx=10, pady=10)
 
 live_label = Label(video_frame, text="LIVE", font=("Arial", 12, "bold"), fg="red", bg="#2c3e50")
 live_label.place(x=10, y=10)
@@ -70,13 +84,28 @@ live_label.place(x=10, y=10)
 fps_label = Label(video_frame, text="FPS: 0", font=("Arial", 10), fg="white", bg="#2c3e50")
 fps_label.place(x=10, y=35)
 
-# === 右側快照 + 統計圖區 ===
-right_frame = Frame(main_frame, bg="#ecf0f1")
-right_frame.pack(side=RIGHT, fill=BOTH, expand=True, padx=20, pady=20)
+# === 右側：可滾動快照 + 統計圖 ===
+right_outer = Frame(main_pane, bg="#ecf0f1")
+main_pane.add(right_outer, minsize=500)
 
-# 快照顯示
+canvas = Canvas(right_outer, bg="#ecf0f1", highlightthickness=0)
+scrollbar = Scrollbar(right_outer, orient=VERTICAL, command=canvas.yview)
+canvas.configure(yscrollcommand=scrollbar.set)
+
+scrollbar.pack(side=RIGHT, fill=Y)
+canvas.pack(side=LEFT, fill=BOTH, expand=True)
+
+right_frame = Frame(canvas, bg="#ecf0f1")
+canvas.create_window((0, 0), window=right_frame, anchor='nw')
+
+def on_frame_configure(event):
+    canvas.configure(scrollregion=canvas.bbox("all"))
+
+right_frame.bind("<Configure>", on_frame_configure)
+
+# === 右側內容 ===
 snapshot_title = Label(right_frame, text="🖼 最新快照", font=("Arial", 14, "bold"), bg="#ecf0f1")
-snapshot_title.pack(anchor=W)
+snapshot_title.pack(anchor=W, pady=(10, 0))
 
 snapshot_label = Label(right_frame, bg="#34495e")
 snapshot_label.pack(pady=5)
@@ -84,20 +113,16 @@ snapshot_label.pack(pady=5)
 conf_label = Label(right_frame, text="信心值: --%", font=("Arial", 12), bg="#ecf0f1")
 conf_label.pack()
 
-# 分類統計圖標題
 chart_title = Label(right_frame, text="📊 分類統計圖", font=("Arial", 14, "bold"), bg="#ecf0f1")
 chart_title.pack(anchor=W, pady=(20, 0))
 
-# matplotlib 統計圖（動態生成）
 fig, ax = plt.subplots(figsize=(5, 2.5))
 bar_canvas = FigureCanvasTkAgg(fig, master=right_frame)
 bar_canvas.get_tk_widget().pack()
 
-# 狀態訊息顯示
 status_label = Label(right_frame, text="", font=("Arial", 12), bg="#ecf0f1")
-status_label.pack(pady=(10,0))
+status_label.pack(pady=(10, 0))
 
-# 按鈕
 btn = Button(right_frame, text="📸 拍照 + 傳送", font=("Arial", 14), bg="#3498db", fg="white",
              command=lambda: capture_snapshot())
 btn.pack(pady=10, ipadx=10, ipady=5)
@@ -106,7 +131,7 @@ wrong_btn = Button(right_frame, text="❌ 標記為誤判", font=("Arial", 12), 
                    command=lambda: save_wrong_prediction())
 wrong_btn.pack(pady=5)
 
-# === 畫分類統計圖表 ===
+# === 更新統計圖 ===
 def update_bar_chart():
     ax.clear()
     labels = list(total_counts.keys())
@@ -119,136 +144,114 @@ def update_bar_chart():
     fig.tight_layout()
     bar_canvas.draw()
 
-# === 拍照與傳送指令 ===
+# === 拍照傳送 ===
 def capture_snapshot():
     global snapshot_count, latest_snapshot, latest_label, latest_conf, latest_results
     ret, frame = cap.read()
     if not ret:
-        status_label.config(text="❌ 拍照失敗，無法取得影像", fg="red")
-        window.after(2000, lambda: status_label.config(text=""))
+        status_label.config(text="❌ 拍照失敗", fg="red")
         return
-    results = model(frame, verbose=False)[0]
 
-    best_label = None
-    best_conf = 0
+    results = model(frame, verbose=False)[0]
+    best_label, best_conf = None, 0
 
     for box in results.boxes:
         cls = int(box.cls[0])
         label = model.names[cls]
         conf = float(box.conf[0])
         if label in object_to_action and conf > best_conf:
-            best_label = label
-            best_conf = conf
+            best_label, best_conf = label, conf
 
     snapshot_count += 1
-
-    if best_label:
-        snapshot_path = os.path.join(save_folder, f"{best_label}_{snapshot_count:03d}.jpg")
-    else:
-        snapshot_path = os.path.join(save_folder, f"unknown_{snapshot_count:03d}.jpg")
-
-    cv2.imwrite(snapshot_path, frame)
+    fname = f"{best_label or 'unknown'}_{snapshot_count:03d}.jpg"
+    cv2.imwrite(os.path.join(save_folder, fname), frame)
 
     if best_label:
         action = object_to_action[best_label]
         if ser and ser.is_open:
             ser.write((action + '\n').encode())
         total_counts[best_label] += 1
-        latest_label = best_label
-        latest_conf = best_conf * 100
-        status_label.config(text=f"✅ 已拍攝並送出指令: {best_label}", fg="green")
-        print(f"✅ 偵測到：{best_label}（{best_conf:.2f}），送出指令：{action}")
+        latest_label, latest_conf = best_label, best_conf * 100
+        status_label.config(text=f"✅ 傳送指令: {best_label}", fg="green")
     else:
         if ser and ser.is_open:
             ser.write(b'R\n')
-        latest_label = "None"
-        latest_conf = 0
-        status_label.config(text="❎ 未偵測到有效物件，已發送重置指令", fg="orange")
-        print("❎ 無符合物件，發送 reset")
+        latest_label, latest_conf = "None", 0
+        status_label.config(text="❎ 無效物件，發送重置", fg="orange")
 
     latest_snapshot = frame.copy()
     latest_results = results
     update_bar_chart()
     show_snapshot()
-    window.after(2000, lambda: status_label.config(text=""))
 
-# === 顯示快照與類別（用拍照結果畫框，避免重複推論） ===
+# === 顯示快照圖像 ===
 def show_snapshot():
-    global latest_snapshot, latest_results
     if latest_snapshot is not None and latest_results is not None:
         snap = latest_snapshot.copy()
         for box in latest_results.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cls = int(box.cls[0])
-            label = f"{model.names[cls]}"
-            color = (255, 0, 0)
-            cv2.rectangle(snap, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(snap, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-        rgb = cv2.cvtColor(snap, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(rgb)
-        img = img.resize((300, 200))
-        imgtk = ImageTk.PhotoImage(image=img)
-        snapshot_label.imgtk = imgtk
-        snapshot_label.configure(image=imgtk)
-
-        # 顯示「類別 + 信心值」
+            label = model.names[int(box.cls[0])]
+            cv2.rectangle(snap, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            cv2.putText(snap, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+        img = Image.fromarray(cv2.cvtColor(snap, cv2.COLOR_BGR2RGB))
+        img = img.resize((400, 300))
+        snapshot_label.imgtk = ImageTk.PhotoImage(image=img)
+        snapshot_label.configure(image=snapshot_label.imgtk)
         conf_label.config(text=f"類別: {latest_label}　信心值: {latest_conf:.1f}%")
 
-
-# === 儲存誤判影像 ===
+# === 儲存錯誤樣本 ===
 def save_wrong_prediction():
-    global snapshot_count
     ret, frame = cap.read()
     if not ret:
-        status_label.config(text="❌ 拍照失敗，無法取得影像", fg="red")
-        window.after(2000, lambda: status_label.config(text=""))
+        status_label.config(text="❌ 拍照失敗", fg="red")
         return
-
-    # 取得目前標籤，如果沒有則標為 unknown
-    label_name = latest_label if latest_label else "unknown"
-
-    # 建立對應分類資料夾（如 misclassified/plastic）
-    label_folder = os.path.join(misclassified_folder, label_name)
+    label_folder = os.path.join(misclassified_folder, latest_label or "unknown")
     os.makedirs(label_folder, exist_ok=True)
-
-    # 儲存圖片檔案
-    path = os.path.join(label_folder, f"wrong_{label_name}_{snapshot_count}.jpg")
+    path = os.path.join(label_folder, f"wrong_{latest_label}_{snapshot_count}.jpg")
     cv2.imwrite(path, frame)
+    status_label.config(text=f"⚠️ 儲存錯誤樣本：{path}", fg="red")
 
-    status_label.config(text=f"⚠️ 錯誤樣本儲存至：{path}", fg="red")
-    window.after(2000, lambda: status_label.config(text=""))
-    print(f"⚠️ 錯誤樣本儲存至：{path}")
-
-# === 即時畫面更新（含 FPS 顯示） ===
+# === 更新即時畫面 + 等比例縮放 ===
 def update_video():
-    global prev_frame_time, new_frame_time
+    global prev_frame_time
     ret, frame = cap.read()
     if ret:
         results = model(frame, verbose=False)[0]
         for box in results.boxes:
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cls = int(box.cls[0])
-            label = f"{model.names[cls]} {box.conf[0]:.2f}"
-            color = (0, 255, 0)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            label = model.names[int(box.cls[0])]
+            conf = float(box.conf[0])
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-        # FPS 計算
-        new_frame_time = time.time()
-        fps = 1 / (new_frame_time - prev_frame_time + 1e-10)
-        prev_frame_time = new_frame_time
+        # FPS 顯示
+        now = time.time()
+        fps = 1 / (now - prev_frame_time + 1e-10)
+        prev_frame_time = now
         fps_label.config(text=f"FPS: {fps:.1f}")
 
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(rgb_frame)
-        imgtk = ImageTk.PhotoImage(image=img)
-        video_label.imgtk = imgtk
-        video_label.configure(image=imgtk)
+        # 等比例縮放
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(rgb)
+
+        label_w, label_h = video_label.winfo_width(), video_label.winfo_height()
+        label_ratio = label_w / label_h
+        img_ratio = img.width / img.height
+        if img_ratio > label_ratio:
+            new_width = label_w
+            new_height = int(label_w / img_ratio)
+        else:
+            new_height = label_h
+            new_width = int(label_h * img_ratio)
+        if new_width > 0 and new_height > 0:
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        video_label.imgtk = ImageTk.PhotoImage(image=img)
+        video_label.configure(image=video_label.imgtk)
 
     window.after(30, update_video)
 
-# === 關閉系統前釋放資源 ===
+# === 關閉前釋放資源 ===
 def on_close():
     cap.release()
     if ser and ser.is_open:

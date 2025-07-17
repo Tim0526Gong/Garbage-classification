@@ -3,7 +3,6 @@
 #include "robotic_arm.h"
 #include "string.h"
 
-
 /// 初始化機械手臂的伺服馬達參數與 GPIO 腳位
 void robotic_arm_starter(robotic_arm* robot_arm, servo* motor) {
     if (!robot_arm || !motor) {
@@ -35,53 +34,39 @@ void robotic_arm_custom_control_mode(robotic_arm* robot_arm) {
     };
 
     // 預先定義四組動作序列（A = all, M = metal, G = glass, P = plastic）
-    char action_a[][40] = {
-        "3 0 126 1 33 2 126",//3=馬達數量, 0=指定0號馬達 , 126=馬達角度
+    char pick_and_return[][40] = {
+        "3 0 150 1 40 2 126",// 3 = 馬達數量，0 = 馬達編號，150 = 角度，依序是馬達0角度150，馬達1角度40，馬達2角度126
         "1 3 165",
-        "2 0 90 1 90",
-        "3 0 75 1 43 2 139",
+        "1 1 90",
+        "1 0 90"
+    };
+    char throw_and_return[][40] = {
         "1 3 90",
         "3 0 90 1 90 2 90"
     };
-    char action_m[][40] = {
-        "3 0 126 1 33 2 126",
-        "1 3 165",
-        "2 0 90 1 90",
-        "3 0 75 1 14 2 47",
-        "1 3 90",
-        "3 0 90 1 90 2 90"
-    };
-    char action_g[][40] = {
-        "3 0 126 1 33 2 126",
-        "1 3 165",
-        "2 0 90 1 90",
-        "3 0 34 1 43 2 113",
-        "1 3 90",
-        "3 0 90 1 90 2 90"
-    };
-    char action_p[][40] = {
-        "3 0 126 1 33 2 126",
-        "1 3 165",
-        "2 0 90 1 90",
-        "3 0 51 1 15 2 40",
-        "1 3 90",
-        "3 0 90 1 90 2 90"
-    };
+    char action_a[][40] = {"3 0 90 1 65 2 145"}; // 動作 A：3個馬達分別到指定角度
+    char action_m[][40] = {"3 0 85 1 25 2 47"};
+    char action_g[][40] = {"3 0 36 1 65 2 140"};
+    char action_p[][40] = {"3 0 51 1 30 2 40"};
 
     char action_tip[] = "Enter 'a', 'm', 'g', or 'p' to play actions, 'q' to quit:\n";
     printf(action_tip);
 
     // 等待使用者輸入模式字元
     while (true) {
-        int input = getchar_timeout_us(0);
-        if (input == PICO_ERROR_TIMEOUT) {
-            sleep_ms(10);
-            continue;
-        }
+        int input = getchar();
+        if(input == '\n') continue; // 忽略換行符號
 
         // 根據輸入選擇動作序列
         char (*selected_action)[40] = NULL;
         int action_len = 0;
+        selected_action = pick_and_return;
+        action_len = sizeof(pick_and_return)/sizeof(pick_and_return[0]);
+        for (int i = 0; i < action_len; i++) {
+            robotic_arm_signal_from_string(&control_signal, selected_action[i]);
+            robotic_arm_move(robot_arm, &control_signal);
+            sleep_ms(100); // 每段動作間稍微間隔
+        }
         switch (input) {
             case 'a': case 'A': selected_action = action_a; action_len = sizeof(action_a)/sizeof(action_a[0]); break;
             case 'm': case 'M': selected_action = action_m; action_len = sizeof(action_m)/sizeof(action_m[0]); break;
@@ -93,6 +78,13 @@ void robotic_arm_custom_control_mode(robotic_arm* robot_arm) {
         }
 
         // 執行動作序列（轉成控制信號並移動）
+        for (int i = 0; i < action_len; i++) {
+            robotic_arm_signal_from_string(&control_signal, selected_action[i]);
+            robotic_arm_move(robot_arm, &control_signal);
+            sleep_ms(100); // 每段動作間稍微間隔
+        }
+        selected_action = throw_and_return;
+        action_len = sizeof(throw_and_return)/sizeof(throw_and_return[0]);
         for (int i = 0; i < action_len; i++) {
             robotic_arm_signal_from_string(&control_signal, selected_action[i]);
             robotic_arm_move(robot_arm, &control_signal);

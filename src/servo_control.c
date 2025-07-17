@@ -5,7 +5,7 @@
 #include <math.h>
 
 
-const uint max_servo_move_ms = 5000;    // Maximum time (ms) for a servo smooth move
+const uint max_servo_move_ms = 3000;    // Maximum time (ms) for a servo smooth move
 
 /**
  * Calculate the number of steps needed for the smooth transition.
